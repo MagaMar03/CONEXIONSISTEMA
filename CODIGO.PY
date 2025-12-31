@@ -22,16 +22,67 @@ DB_CONFIG = {
     "host": "10.58.50.4",
     "user": "admisistema",
     "password": "1234",
-    "database": "mi_base"
+    "database": "mi_base",
+    "connect_timeout": 5  # Timeout de 5 segundos para evitar esperas largas
 }
 
-# Engine de SQLAlchemy para pandas
-DB_ENGINE = create_engine(
-    f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
-    f"{DB_CONFIG['host']}/{DB_CONFIG['database']}",
-    pool_pre_ping=True,
-    pool_recycle=3600
-)
+# Variable global para estado de conexión
+CONEXION_DISPONIBLE = False
+
+# Engine de SQLAlchemy para pandas (con timeout)
+DB_ENGINE = None
+
+def crear_engine_seguro():
+    """Crea el engine de SQLAlchemy de forma segura"""
+    global DB_ENGINE
+    try:
+        DB_ENGINE = create_engine(
+            f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
+            f"{DB_CONFIG['host']}/{DB_CONFIG['database']}?connect_timeout=5",
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_timeout=5
+        )
+        return True
+    except Exception as e:
+        print(f"Error creando engine: {e}")
+        return False
+
+def verificar_conexion_bd():
+    """Verifica si hay conexión a la base de datos"""
+    global CONEXION_DISPONIBLE
+    try:
+        conn = mysql.connector.connect(
+            host=DB_CONFIG["host"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+            connect_timeout=3
+        )
+        conn.close()
+        CONEXION_DISPONIBLE = True
+        return True
+    except Exception as e:
+        CONEXION_DISPONIBLE = False
+        print(f"Sin conexión a BD: {e}")
+        return False
+
+def mostrar_error_conexion():
+    """Muestra un mensaje de error amigable cuando no hay conexión"""
+    messagebox.showerror(
+        "Error de Conexión",
+        f"No se puede conectar al servidor MySQL.\n\n"
+        f"Servidor: {DB_CONFIG['host']}\n"
+        f"Base de datos: {DB_CONFIG['database']}\n\n"
+        "Posibles causas:\n"
+        "• No estás conectado a la red correcta\n"
+        "• El servidor MySQL está apagado\n"
+        "• Firewall bloqueando el puerto 3306\n\n"
+        "Verifica tu conexión de red e intenta de nuevo."
+    )
+
+# Inicializar engine de forma segura
+crear_engine_seguro()
 # ------------------------------
 #fiscalizaciones1: OF (solo aqui cambia la tipografia del encabezado)
 #fiscalizaciones2: OFR (Recaudación)
@@ -301,6 +352,11 @@ def hacer_click_rapido(boton, comando_pesado):
 
 def precargar_datos_iniciales():
     """Precarga datos comunes al inicio para acelerar la aplicación"""
+    # PRIMERO verificar si hay conexión disponible
+    if not verificar_conexion_bd():
+        # No hay conexión, no intentar precargar
+        return
+
     # Esta función se llama después de que data_cache existe
     # Las consultas se precargan en background para que estén listas cuando se necesiten
     try:
@@ -319,15 +375,16 @@ def precargar_datos_iniciales():
         for key, query in queries.items():
             def load_query(k, q):
                 try:
-                    result = pd.read_sql(q, DB_ENGINE)
-                    # Usar el cache global cuando esté disponible
-                    if 'data_cache' in globals():
-                        data_cache.set(k, result)
+                    if DB_ENGINE is not None:
+                        result = pd.read_sql(q, DB_ENGINE)
+                        # Usar el cache global cuando esté disponible
+                        if 'data_cache' in globals():
+                            data_cache.set(k, result)
                 except Exception as e:
-                    print(f"Precarga {k}: {e}")
+                    pass  # Silenciar errores de precarga
             threading.Thread(target=load_query, args=(key, query), daemon=True).start()
     except Exception as e:
-        print(f"Error en precarga inicial: {e}")
+        pass  # Silenciar errores de precarga
 
 # Decorador para funciones que cargan datos
 def carga_optimizada(cache_key=None, ttl=300):
@@ -597,6 +654,10 @@ def crear_labels_fechas():
 
 def cargar_fechas_actualizacion():
     """Carga las fechas de actualización desde la base de datos"""
+    # Verificar conexión antes de intentar cargar
+    if DB_ENGINE is None or not CONEXION_DISPONIBLE:
+        return
+
     try:
         query = "SELECT nombre_tabla, fecha_actualizacion FROM actualizaciones_tablas"
         df = pd.read_sql(query, DB_ENGINE)
@@ -612,7 +673,7 @@ def cargar_fechas_actualizacion():
                 else:
                     labels_fechas[nombre_tabla].configure(text="Sin datos", text_color="#6B7280")
     except Exception as e:
-        print(f"Error al cargar fechas: {e}")
+        pass  # Silenciar errores de conexión
 
 def registrar_actualizacion(nombre_tabla, registros=0):
     """Registra la fecha de actualización de una tabla"""
@@ -19162,7 +19223,14 @@ def mostrar_datos():
             pass
         preview_frame.pack(fill="both", expand=True, padx=10, pady=(5,10))
 
-        conn = mysql.connector.connect(**DB_CONFIG)
+        # Usar timeout en la conexión para evitar bloqueos largos
+        conn = mysql.connector.connect(
+            host=DB_CONFIG["host"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+            connect_timeout=5
+        )
         cursor = conn.cursor()
         cursor.execute("SELECT NUM_ORD_FI, DDP_NOMBRE, Anio_Emis, Estado FROM fiscalizaciones1 LIMIT 20")
         filas = cursor.fetchall()
@@ -19173,6 +19241,9 @@ def mostrar_datos():
 
         for fila in filas:
             tree.insert("", "end", values=fila)
+    except mysql.connector.Error as e:
+        # Error específico de MySQL - mostrar mensaje amigable
+        mostrar_error_conexion()
     except Exception as e:
         messagebox.showerror("Error", f"No se pudieron cargar los datos:\n{e}")
 
@@ -19195,6 +19266,11 @@ def ocultar_menu():
         menu_visible = False
 
 def ir_a_modulo():
+    # VERIFICAR CONEXIÓN ANTES DE CONTINUAR
+    if not verificar_conexion_bd():
+        mostrar_error_conexion()
+        return  # No continuar si no hay conexión
+
     frame_inicio.pack_forget()
     header.pack_forget()
     frame_modulo.pack(fill="both", expand=True)
