@@ -49,7 +49,7 @@ def crear_engine_seguro():
         return False
 
 def verificar_conexion_bd():
-    """Verifica si hay conexión a la base de datos"""
+    """Verifica si hay conexión a la base de datos (RAPIDO - timeout 2 seg)"""
     global CONEXION_DISPONIBLE
     try:
         conn = mysql.connector.connect(
@@ -57,14 +57,13 @@ def verificar_conexion_bd():
             user=DB_CONFIG["user"],
             password=DB_CONFIG["password"],
             database=DB_CONFIG["database"],
-            connect_timeout=3
+            connect_timeout=2  # Timeout reducido a 2 segundos
         )
         conn.close()
         CONEXION_DISPONIBLE = True
         return True
     except Exception as e:
         CONEXION_DISPONIBLE = False
-        print(f"Sin conexión a BD: {e}")
         return False
 
 def mostrar_error_conexion():
@@ -80,6 +79,49 @@ def mostrar_error_conexion():
         "• Firewall bloqueando el puerto 3306\n\n"
         "Verifica tu conexión de red e intenta de nuevo."
     )
+
+# Variable global para controlar el estado de verificación
+_verificacion_en_curso = False
+_resultado_verificacion = None
+
+def verificar_conexion_async(callback_exito, callback_error):
+    """
+    Verifica conexión en segundo plano SIN BLOQUEAR la interfaz.
+    Llama a callback_exito() si hay conexión, callback_error() si no.
+    """
+    global _verificacion_en_curso, _resultado_verificacion
+
+    if _verificacion_en_curso:
+        return
+
+    _verificacion_en_curso = True
+
+    def verificar_en_thread():
+        global _verificacion_en_curso, _resultado_verificacion
+        try:
+            resultado = verificar_conexion_bd()
+            _resultado_verificacion = resultado
+        except:
+            _resultado_verificacion = False
+        finally:
+            _verificacion_en_curso = False
+
+    def revisar_resultado():
+        global _verificacion_en_curso, _resultado_verificacion
+        if _verificacion_en_curso:
+            # Aún verificando, revisar de nuevo en 100ms
+            app.after(100, revisar_resultado)
+        else:
+            # Verificación completada
+            if _resultado_verificacion:
+                callback_exito()
+            else:
+                callback_error()
+
+    # Iniciar verificación en thread separado
+    threading.Thread(target=verificar_en_thread, daemon=True).start()
+    # Revisar resultado sin bloquear
+    app.after(100, revisar_resultado)
 
 # Inicializar engine de forma segura
 crear_engine_seguro()
@@ -19265,11 +19307,20 @@ def ocultar_menu():
         toggle_button.configure(text=">")
         menu_visible = False
 
-def ir_a_modulo():
-    # VERIFICAR CONEXIÓN ANTES DE CONTINUAR
-    if not verificar_conexion_bd():
-        mostrar_error_conexion()
-        return  # No continuar si no hay conexión
+# Variable para el label de "Verificando..."
+_label_verificando = None
+
+def _continuar_a_modulo():
+    """Función interna que se ejecuta cuando la conexión es exitosa"""
+    global _label_verificando
+
+    # Ocultar mensaje de verificando
+    if _label_verificando:
+        try:
+            _label_verificando.destroy()
+        except:
+            pass
+        _label_verificando = None
 
     frame_inicio.pack_forget()
     header.pack_forget()
@@ -19299,6 +19350,43 @@ def ir_a_modulo():
     if "banner_modulo_path" in config:
         mostrar_banner_modulo(config["banner_modulo_path"])
     mostrar_datos()
+
+def _error_conexion():
+    """Función interna que se ejecuta cuando NO hay conexión"""
+    global _label_verificando
+
+    # Ocultar mensaje de verificando
+    if _label_verificando:
+        try:
+            _label_verificando.destroy()
+        except:
+            pass
+        _label_verificando = None
+
+    mostrar_error_conexion()
+
+def ir_a_modulo():
+    """Abre el módulo principal - verifica conexión SIN BLOQUEAR la interfaz"""
+    global _label_verificando
+
+    # Mostrar mensaje de "Verificando conexión..." para que el usuario sepa que está trabajando
+    if _label_verificando is None:
+        _label_verificando = ctk.CTkLabel(
+            frame_inicio,
+            text="⏳ Verificando conexión...",
+            font=("Segoe UI", 12),
+            text_color="#1E40AF"
+        )
+        _label_verificando.pack(pady=10)
+
+    # Forzar actualización de la interfaz para que se vea el mensaje
+    app.update_idletasks()
+
+    # Verificar conexión de forma ASÍNCRONA (no bloquea la interfaz)
+    verificar_conexion_async(
+        callback_exito=_continuar_a_modulo,
+        callback_error=_error_conexion
+    )
 
 ctk.CTkButton(
     frame_inicio,
